@@ -167,6 +167,8 @@ class Webhook:
         self.guild_id = -1
         self.channel_id = -1
 
+        self.last_message_sent_id = None
+
     @classmethod
     def Async(cls, url: str = '', session:
               Optional[aiohttp.ClientSession] = None,
@@ -274,6 +276,51 @@ class Webhook:
 
         return self._request('POST', payload, file=file)
 
+    def edit_message(self, message_id: int,
+             content: str = '',
+             embed: Optional[Embed] = None,
+             embeds: Optional[List[Embed]] = None
+        ) -> 'Webhook':
+        """
+        Edit a message through the webhook.
+
+        Parameters
+        ----------
+        message_id: int
+            The message ID that will be edited.
+
+        content: str, optional
+            The message contents (up to 2000 characters)
+
+        embed: :class:`Embed`, optional
+            Single embedded rich content.
+
+        embeds: List[:class:`Embed`], optional
+            List of embedded rich content.
+
+        """
+
+        payload = {
+            'message_id': message_id
+        }
+
+        if content:
+            payload['content'] = content
+
+        if embeds is None:
+            embeds = []
+            if embed is not None:
+                embeds.append(embed)
+        else:
+            if embed is not None:
+                raise ValueError("embed and embeds cannot both be set.")
+
+        if not content and not embeds and not file:
+            raise ValueError("One of content or embed/embeds must be set.")
+        payload['embeds'] = [em.to_dict() for em in embeds]
+
+        return self._request('PATCH', payload)
+
     @alias('edit')
     def modify(self, name: str = '',
                avatar: bytes = b"") -> 'Webhook':
@@ -352,18 +399,20 @@ class Webhook:
                 if file is not None:
                     payload = {'payload_json': json.dumps(payload)}
                     multipart = {'file': (file.name, file.fp)}
-                    resp = self.session.post(self.url, data=payload,
+                    resp = self.session.post(self.url + "?wait=true", data=payload,
                                              headers=headers, files=multipart)
                 else:
                     headers['Content-Type'] = 'application/json'
-                    resp = self.session.post(self.url, json=payload,
+                    resp = self.session.post(self.url + "?wait=true", json=payload,
                                              headers=headers)
 
             elif method == "DELETE":
                 resp = self.session.delete(self.url, headers=headers)
 
             elif method == "PATCH":
-                resp = self.session.patch(self.url, json=payload,
+                message_id = payload.pop('message_id', None)
+                url = self.url if not message_id else f"{self.url}/messages/{message_id}"
+                resp = self.session.patch(url, json=payload,
                                           headers=headers)
 
             elif method == "GET":
@@ -372,8 +421,10 @@ class Webhook:
             else:
                 raise ValueError("Bad method: {}".format(method))
 
+            resp_json = resp.json()
+
             if resp.status_code == 429:  # Too many request
-                time.sleep(resp.json()['retry_after'] / 1000.0)
+                time.sleep(resp_json['retry_after'] / 1000.0)
                 if file is not None:
                     file.seek()
                 continue
@@ -387,7 +438,7 @@ class Webhook:
 
         resp.raise_for_status()
 
-        self._update_fields(resp.json())
+        self._update_fields(resp_json)
         return self
 
     async def _async_request(self, method: str = 'POST',
@@ -418,13 +469,13 @@ class Webhook:
                     data.add_field('file', file.fp, filename=file.name)
                     data.add_field('payload_json', json.dumps(payload))
 
-                    resp = await self.session.post(self.url,
+                    resp = await self.session.post(self.url + "?wait=true",
                                                    data=data,
                                                    headers=headers)
 
                 else:
                     headers['Content-Type'] = 'application/json'
-                    resp = await self.session.post(self.url,
+                    resp = await self.session.post(self.url + "?wait=true",
                                                    json=payload,
                                                    headers=headers)
 
@@ -433,7 +484,9 @@ class Webhook:
                                                  headers=headers)
 
             elif method == "PATCH":
-                resp = await self.session.patch(self.url,
+                message_id = payload.pop('message_id', None)
+                url = self.url if not message_id else f"{self.url}/messages/{message_id}"
+                resp = await self.session.patch(url,
                                                 json=payload,
                                                 headers=headers)
 
@@ -444,9 +497,10 @@ class Webhook:
             else:
                 raise ValueError("Bad method: {}".format(method))
 
+            resp_json = await resp.json()
+
             if resp.status == 429:  # Too many request
-                await asyncio.sleep((await resp.json())
-                                    ['retry_after'] / 1000.0)
+                await asyncio.sleep(resp_json['retry_after'] / 1000.0)
                 if file is not None:
                     file.seek()
                 continue
@@ -460,11 +514,12 @@ class Webhook:
 
         resp.raise_for_status()
 
-        self._update_fields(await resp.json())
+        self._update_fields(resp_json)
         return self
 
     def _update_fields(self, data: dict) -> None:
         if 'content' in data:
+            self.last_message_sent_id = data.get('id', self.last_message_sent_id)
             return  # a message object was returned
         self.id = data.get('id', self.id)
         self.token = data.get('token', self.token)
